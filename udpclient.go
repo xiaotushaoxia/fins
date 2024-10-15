@@ -39,6 +39,8 @@ type UDPClient struct {
 	conn   *net.UDPConn
 	ctx    context.Context
 	cancel context.CancelFunc
+
+	ignoreErrorCode atomic.Value // map[uint16]struct{}{}
 }
 
 // NewUDPClient creates a new Omron FINS client
@@ -137,7 +139,7 @@ func (c *UDPClient) WriteBytes(memoryArea byte, address uint16, b []byte) error 
 			return err
 		}
 		command := writeCommand(memAddr(memoryArea, address), uint16(len(b)/2), b)
-		return checkResponse(c.sendCommand(command))
+		return c.checkResponse(c.sendCommand(command))
 	})
 }
 
@@ -175,7 +177,7 @@ func (c *UDPClient) WriteBits(memoryArea byte, address uint16, bitOffset byte, d
 		}
 		command := writeCommand(memAddrWithBitOffset(memoryArea, address, bitOffset), l, bts)
 
-		return checkResponse(c.sendCommand(command))
+		return c.checkResponse(c.sendCommand(command))
 	})
 }
 
@@ -236,6 +238,16 @@ func (c *UDPClient) SetReadGoroutineNum(count uint8) {
 // Close Closes an Omron FINS connection
 func (c *UDPClient) Close() {
 	c.sf.do(c.wrapClose)
+}
+
+// SetIgnoreErrorCodes
+// Set ignore error codes
+func (c *UDPClient) SetIgnoreErrorCodes(codes []uint16) {
+	mp := map[uint16]struct{}{}
+	for _, code := range codes {
+		mp[code] = struct{}{}
+	}
+	c.ignoreErrorCode.Store(mp)
 }
 
 // ============== private ==============
@@ -382,7 +394,7 @@ func (c *UDPClient) sendCommandAndCheckResponse(command []byte) (*response, erro
 	if err != nil {
 		return nil, err
 	}
-	er := checkResponse(resp, err)
+	er := c.checkResponse(resp, err)
 	if er != nil {
 		return nil, er
 	}
@@ -401,7 +413,7 @@ func (c *UDPClient) bitTwiddle(memoryArea byte, address uint16, bitOffset byte, 
 func (c *UDPClient) _bitTwiddle(memoryArea byte, address uint16, bitOffset byte, value byte) error {
 	mem := memoryAddress{memoryArea, address, bitOffset}
 	command := writeCommand(mem, 1, []byte{value})
-	return checkResponse(c.sendCommand(command))
+	return c.checkResponse(c.sendCommand(command))
 }
 
 func (c *UDPClient) readBits(memoryArea byte, address uint16, bitOffset byte, readCount uint16) ([]bool, error) {
@@ -506,6 +518,20 @@ func (c *UDPClient) bytesToUint16s(bs []byte) []uint16 {
 	return data
 }
 
+func (c *UDPClient) checkResponse(r *response, err error) error {
+	if err != nil {
+		return err
+	}
+	if r.endCode == EndCodeNormalCompletion {
+		return nil
+	}
+	m, _ := c.ignoreErrorCode.Load().(map[uint16]struct{})
+	if _, ok := m[r.endCode]; ok {
+		return nil
+	}
+	return EndCodeError{r.endCode}
+}
+
 func wrapRead[T any](c *UDPClient, do func() (T, error)) (result T, err error) {
 	c.wg.Add(1)
 	defer c.wg.Done()
@@ -514,17 +540,6 @@ func wrapRead[T any](c *UDPClient, do func() (T, error)) (result T, err error) {
 	}
 	return do()
 }
-
-func checkResponse(r *response, err error) error {
-	if err != nil {
-		return err
-	}
-	if r.endCode != EndCodeNormalCompletion {
-		return EndCodeError{r.endCode}
-	}
-	return nil
-}
-
 func decodeClock(data []byte) (*time.Time, error) {
 	if len(data) < 6 {
 		return nil, fmt.Errorf("failed to decode colck: data length should be 6, got: %d", len(data))

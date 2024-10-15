@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -134,4 +135,11 @@ func TestClient_bytesToUint16s(t *testing.T) {
 	var c UDPClient
 	v := []uint16{24, 567}
 	assert.Equal(t, v, c.bytesToUint16s(c.uint16sToBytes(v)))
+}
+
+func Test_atomicValue(t *testing.T) {
+	var v atomic.Value
+	m, ok := v.Load().(map[uint16]int)
+	assert.Equal(t, false, ok)
+	assert.Equal(t, 0, m[1])
 }
